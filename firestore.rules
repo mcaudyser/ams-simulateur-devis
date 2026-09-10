@@ -1,0 +1,42 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    // Catalogue prix / prestations (doc unique : config/services)
+    // Lecture : tout utilisateur connecté (concessionnaire ou admin)
+    // Écriture : admin uniquement
+    match /config/{doc} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Fiches concessionnaires : concessionnaires/{uid}
+    // Lecture : le concessionnaire lui-même, ou un admin
+    // Écriture : admin uniquement (création/màj/suppression via l'espace admin)
+    match /concessionnaires/{uid} {
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Flags admin : admins/{uid} (doc vide)
+    // Lecture : soi-même uniquement. Écriture : bloquée -> gérée à la main dans la console.
+    match /admins/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // Tout le reste est verrouillé
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

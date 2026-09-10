@@ -1,0 +1,10 @@
+# Documents de travail (non nécessaires au site)
+*.docx
+*.xlsx
+~$*
+
+# OS / éditeurs
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
