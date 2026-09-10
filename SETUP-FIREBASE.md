@@ -2,95 +2,65 @@
 
 Projet : `ams-simulateur-devis` · Région Firestore : `eur3`
 
-Le code client est déjà branché dans `simulateurdevisAMSV9.html`.
-Il reste 4 opérations **à faire une fois dans la console Firebase**.
+La config client est déjà dans `index.html`. Opérations à faire **une fois** dans
+la console Firebase pour repartir d'un projet vierge.
 
 ---
 
 ## 1. Publier les règles Firestore
 
-Console → **Firestore Database → Règles** → colle le contenu de `firestore.rules`
-(dans ce dossier) → **Publier**.
-
-Tant que ces règles ne sont pas publiées, la connexion échouera (« Compte non reconnu »).
-
----
+Console → **Firestore Database → Règles** → coller le contenu de `firestore.rules`
+→ **Publier**. Sans ça, toute connexion échoue (« Compte non reconnu »).
 
 ## 2. Activer la connexion e-mail / mot de passe
 
-Console → **Authentication → Sign-in method** →
-active **« Adresse e-mail/Mot de passe »**.
-Laisse **« Lien de connexion par e-mail » désactivé**.
-
----
+Console → **Authentication → Sign-in method** → activer
+**« Adresse e-mail/Mot de passe »** (laisser « Lien par e-mail » désactivé).
 
 ## 3. Créer le premier compte admin
 
-> Le double-clic sur le logo ouvre une invite « Identifiant admin / Code admin ».
+L'accès admin se fait par **double-clic sur le logo** (invite identifiant / code).
 
-### 3a. Créer l'utilisateur Auth
-Console → **Authentication → Users → Ajouter un utilisateur**
-- E-mail : `admin@ams-simulateur-devis.web.app`
-- Mot de passe : un code d'**au moins 6 caractères** (ce sera le « Code admin »)
-- **Copie l'UID** de l'utilisateur créé (colonne « Identifiant utilisateur »).
-
-### 3b. Créer le flag admin dans Firestore
-Console → **Firestore Database → Données → Démarrer une collection**
-- ID de la collection : `admins`
-- ID du document : **colle l'UID copié à l'étape 3a**
-- Ajoute un champ quelconque, ex. `label` (type *string*) = `Admin AMS`
-- **Enregistrer**
+1. **Authentication → Users → Ajouter un utilisateur**
+   - E-mail : `admin@ams-simulateur-devis.web.app`
+   - Mot de passe : un code fort (≥ 8 caractères) — ce sera le « Code admin »
+   - Copier l'**UID** de la ligne créée.
+2. **Firestore → Données → Démarrer une collection**
+   - Collection : `admins`
+   - Document : **coller l'UID** ci-dessus
+   - Champ `label` (string) = `Admin AMS` → Enregistrer
 
 ➡️ Connexion admin = identifiant `ADMIN` + le code choisi.
-(`ADMIN` → `admin@ams-simulateur-devis.web.app`, en minuscules, automatiquement.)
 
----
+## 4. Concessionnaires
 
-## 4. Créer le compte concessionnaire de test
-
-### 4a. Utilisateur Auth
-Console → **Authentication → Users → Ajouter un utilisateur**
-- E-mail : `ams@ams-simulateur-devis.web.app`
-- Mot de passe : un code d'au moins 6 chiffres, ex. `001234`
-- **Copie l'UID**.
-
-### 4b. Fiche concessionnaire dans Firestore
-Console → **Firestore Database → Données** →
-collection `concessionnaires` → **Ajouter un document**
-- ID du document : **l'UID copié à l'étape 4a**
-- Champs :
-
-| Champ             | Type   | Valeur              |
-|------------------|--------|---------------------|
-| `loginId`         | string | `AMS`               |
-| `label`           | string | `Compte test AMS`   |
-| `agencyGroup`     | string | `Test`              |
-| `priceMultiplier` | number | `1`                 |
-
-➡️ Connexion concessionnaire = identifiant `AMS` + code `001234`.
-
----
+À créer **depuis l'espace admin** (onglet « Concessionnaires » → « + Nouveau
+concessionnaire »). Le panel gère la création du compte, le code, l'activation
+et la suppression. Aucune manip console nécessaire.
 
 ## 5. Catalogue prix / prestations
 
-Pour l'instant le catalogue reste **codé en dur** dans le HTML (tableau `services`),
-utilisé comme valeur par défaut.
-
-La migration vers Firestore (`config/services`) + le CRUD se font à l'**étape 2**
-(espace admin). Aucune action requise maintenant.
+Le catalogue par défaut est codé en dur dans `index.html` (tableau `services`).
+Dans l'espace admin, onglet « Prestations & prix » → **« Enregistrer dans
+Firestore »** publie le catalogue dans `config/services`, qui devient alors la
+source (le tableau en dur reste un filet de sécurité).
 
 ---
 
 ## Correspondance identifiant → e-mail (interne)
 
-L'identifiant saisi est mis en minuscules, nettoyé, puis suffixé :
+L'identifiant saisi est mis en minuscules, nettoyé, puis suffixé
+`@ams-simulateur-devis.web.app` (domaine synthétique, ne reçoit aucun courrier).
 
 ```
 AMS    → ams@ams-simulateur-devis.web.app
 ADMIN  → admin@ams-simulateur-devis.web.app
 ```
 
-Ce domaine ne sert jamais à recevoir du courrier. Un « mot de passe oublié »
-n'est donc pas possible : l'admin réattribue un code depuis l'espace admin
-(étape 2) ou depuis Authentication → Users → menu ⋮ → « Réinitialiser le mot de passe »
-n'enverra rien d'utile — préférer la suppression / recréation.
+Pas de « mot de passe oublié » : un code se réattribue depuis l'espace admin
+(colonne « Code »), ou en supprimant / recréant le compte dans la console.
+
+## Domaine autorisé (déploiement)
+
+Après mise en ligne : **Authentication → Settings → Domaines autorisés** →
+ajouter le domaine du site (ex. `mcaudyser.github.io`).
