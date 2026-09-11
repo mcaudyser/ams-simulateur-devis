@@ -59,6 +59,11 @@ l'espace admin) pour pratiquer ses propres prix :
   continue de suivre la grille par défaut). Stocké dans `agencyPrices/{id}`.
 - Dans « Concessionnaires », relier chaque compte à son agence via la colonne
   « Agence » (champ `agencyId` sur la fiche `concessionnaires/{uid}`).
+- Chaque agence peut aussi avoir un **e-mail de destination des devis**
+  (champ « E-mail devis », optionnel) + un **CC** optionnel. Si renseigné, le
+  bouton « Envoyer à notre équipe » du concessionnaire pré-remplit ce
+  destinataire (et ce CC) au lieu de `comams@automultiservices.com`. Laisser
+  vide pour garder l'adresse par défaut.
 
 ---
 

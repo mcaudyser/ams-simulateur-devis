@@ -459,7 +459,12 @@ async function applyAgencyOverrides(agencyId){
       db.collection('agencyPrices').doc(agencyId).get(),
       db.collection('agencies').doc(agencyId).get()
     ]);
-    if(agSnap.exists) session.account.agencyName = agSnap.data().name || '';
+    if(agSnap.exists){
+      const ad = agSnap.data();
+      session.account.agencyName = ad.name || '';
+      session.account.notifyEmail = ad.notifyEmail || '';
+      session.account.notifyCc = ad.notifyCc || '';
+    }
     const overrides = (ovSnap.exists && ovSnap.data().overrides) || {};
     Object.keys(overrides).forEach(key => {
       const [ci, ii] = key.split('-').map(Number);
@@ -696,7 +701,10 @@ function renderAdminBody(){
 async function loadAdminAgencies(){
   try {
     const snap = await db.collection('agencies').orderBy('name').get();
-    adminAgencies = snap.docs.map(d=>({ id: d.id, name: d.data().name || '(sans nom)' }));
+    adminAgencies = snap.docs.map(d=>({
+      id: d.id, name: d.data().name || '(sans nom)',
+      notifyEmail: d.data().notifyEmail || '', notifyCc: d.data().notifyCc || ''
+    }));
   } catch(e){
     adminAgencies = [];
   }
@@ -957,17 +965,19 @@ async function renderAdminAgencies(){
     </div>
     <div id="agency-form"></div>
     <table class="admin-tbl">
-      <thead><tr><th>Nom de l'agence</th><th></th></tr></thead>
-      <tbody id="agency-rows"><tr><td colspan="2" class="admin-hint">Chargement…</td></tr></tbody>
+      <thead><tr><th>Nom de l'agence</th><th>E-mail devis (optionnel)</th><th>CC (optionnel)</th><th></th></tr></thead>
+      <tbody id="agency-rows"><tr><td colspan="4" class="admin-hint">Chargement…</td></tr></tbody>
     </table>
-    <p class="admin-hint" style="margin-top:12px;">La grille « Chartres » (onglet Prestations &amp; prix) reste le catalogue par défaut. Une agence ci-dessous ne pratique que les prix explicitement personnalisés pour elle — le reste suit la grille par défaut. Les concessionnaires sont reliés à une agence depuis l'onglet Concessionnaires.</p>
+    <p class="admin-hint" style="margin-top:12px;">La grille « Chartres » (onglet Prestations &amp; prix) reste le catalogue par défaut. Une agence ci-dessous ne pratique que les prix explicitement personnalisés pour elle — le reste suit la grille par défaut. Les concessionnaires sont reliés à une agence depuis l'onglet Concessionnaires.<br>« E-mail devis » : si renseigné, les devis/commandes des concessionnaires de cette agence sont adressés à cet e-mail au lieu de comams@automultiservices.com. Laisser vide pour garder l'adresse par défaut.</p>
   `;
   await loadAdminAgencies();
   document.getElementById('agency-rows').innerHTML = adminAgencies.length ? adminAgencies.map(a=>`
     <tr>
-      <td><input class="admin-in" value="${escAttr(a.name)}" onchange="renameAgency('${a.id}',this.value)"></td>
+      <td><input class="admin-in" value="${escAttr(a.name)}" onchange="updateAgency('${a.id}','name',this.value)"></td>
+      <td><input class="admin-in" value="${escAttr(a.notifyEmail||'')}" placeholder="comams@automultiservices.com" onchange="updateAgency('${a.id}','notifyEmail',this.value)"></td>
+      <td><input class="admin-in" value="${escAttr(a.notifyCc||'')}" placeholder="—" onchange="updateAgency('${a.id}','notifyCc',this.value)"></td>
       <td><button class="admin-btn sm danger" onclick="deleteAgency('${a.id}','${escAttr(a.name)}')">Supprimer</button></td>
-    </tr>`).join('') : '<tr><td colspan="2" class="admin-hint">Aucune agence. Tous les concessionnaires utilisent la grille par défaut (Chartres).</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="4" class="admin-hint">Aucune agence. Tous les concessionnaires utilisent la grille par défaut (Chartres).</td></tr>';
 }
 function showAgencyForm(){
   document.getElementById('agency-form').innerHTML = `
@@ -975,6 +985,8 @@ function showAgencyForm(){
       <h3>Nouvelle agence</h3>
       <div class="admin-grid2">
         <label>Nom de l'agence (ex. Lille)<input class="admin-in" id="na-name"></label>
+        <label>E-mail devis (optionnel, sinon comams@automultiservices.com)<input class="admin-in" id="na-email" placeholder="ex. camille@automultiservices.com"></label>
+        <label>CC (optionnel)<input class="admin-in" id="na-cc" placeholder="ex. com59@automultiservices.com"></label>
       </div>
       <div style="margin-top:14px; display:flex; gap:8px;">
         <button class="btn-primary" onclick="createAgency()">Créer</button>
@@ -984,20 +996,22 @@ function showAgencyForm(){
 }
 async function createAgency(){
   const name = document.getElementById('na-name').value.trim();
+  const notifyEmail = document.getElementById('na-email').value.trim();
+  const notifyCc = document.getElementById('na-cc').value.trim();
   if(!name) return adminToast('Nom de l\'agence requis.', false);
   try {
-    await db.collection('agencies').add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    await db.collection('agencies').add({ name, notifyEmail, notifyCc, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
     document.getElementById('agency-form').innerHTML = '';
     adminToast('Agence « ' + name + ' » créée.');
     renderAdminAgencies();
   } catch(e){ adminToast('Échec : ' + e.message, false); }
 }
-async function renameAgency(id, name){
-  name = name.trim();
-  if(!name) return adminToast('Nom requis.', false);
+async function updateAgency(id, key, val){
+  val = val.trim();
+  if(key === 'name' && !val) return adminToast('Nom requis.', false);
   try {
-    await db.collection('agencies').doc(id).update({ name });
-    adminToast('Agence renommée.');
+    await db.collection('agencies').doc(id).update({ [key]: val });
+    adminToast('Agence enregistrée.');
   } catch(e){ adminToast('Échec : ' + e.message, false); }
 }
 async function deleteAgency(id, name){
@@ -1809,14 +1823,24 @@ function generateQuote(mode){
   renderFinal(mode);
   goTo('final');
 }
+/* Adresse de destination des devis/commandes : par défaut comams@automultiservices.com,
+   ou l'e-mail personnalisé de l'agence du concessionnaire connecté (onglet admin Agences). */
+function quoteRecipient(){
+  const acc = session && session.account;
+  return {
+    to: (acc && acc.notifyEmail) || 'comams@automultiservices.com',
+    cc: (acc && acc.notifyCc) || ''
+  };
+}
 function renderFinal(mode){
   const title = document.getElementById('finalTitle');
   const sub = document.getElementById('finalSub');
   const sendBtn = document.getElementById('sendBtn');
+  const recipient = quoteRecipient();
   if(mode === 'commande'){
     title.textContent = 'Votre commande est prête';
     sub.textContent = "Devis signé électroniquement — enregistrez le PDF puis transmettez-le à notre équipe pour lancer la préparation.";
-    sendBtn.innerHTML = '✉️ Transmettre la commande à notre équipe (comams@automultiservices.com)';
+    sendBtn.innerHTML = `✉️ Transmettre la commande à notre équipe (${recipient.to})`;
   } else {
     title.textContent = 'Votre devis est prêt';
     sub.textContent = "Devis sans engagement — enregistrez-le en PDF pour votre client. Vous pouvez aussi nous l'envoyer (facultatif).";
@@ -1933,7 +1957,10 @@ function sendQuoteEmail(){
     `${q.prenom} ${q.nom}`
   ];
   const body = encodeURIComponent(bodyLines.join('\n'));
-  window.location.href = `mailto:comams@automultiservices.com?subject=${subject}&body=${body}`;
+  const recipient = quoteRecipient();
+  let href = `mailto:${recipient.to}?subject=${subject}&body=${body}`;
+  if(recipient.cc) href += `&cc=${encodeURIComponent(recipient.cc)}`;
+  window.location.href = href;
 }
 </script>
 
