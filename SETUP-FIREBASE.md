@@ -45,6 +45,21 @@ Dans l'espace admin, onglet « Prestations & prix » → **« Enregistrer dans
 Firestore »** publie le catalogue dans `config/services`, qui devient alors la
 source (le tableau en dur reste un filet de sécurité).
 
+## 6. Agences et grilles de prix locales
+
+Chaque concessionnaire peut être rattaché à une agence (onglet « Agences » de
+l'espace admin) pour pratiquer ses propres prix :
+
+- La grille « Chartres » (onglet « Prestations & prix », sélecteur sur « grille
+  par défaut ») reste le catalogue de base (`config/services`), utilisé par
+  tout concessionnaire non rattaché à une agence.
+- Créer une agence dans l'onglet « Agences » (collection `agencies`).
+- Dans « Prestations & prix », choisir l'agence dans le sélecteur « Grille de
+  prix » pour ne modifier QUE les prix propres à cette agence (le reste
+  continue de suivre la grille par défaut). Stocké dans `agencyPrices/{id}`.
+- Dans « Concessionnaires », relier chaque compte à son agence via la colonne
+  « Agence » (champ `agencyId` sur la fiche `concessionnaires/{uid}`).
+
 ---
 
 ## Correspondance identifiant → e-mail (interne)

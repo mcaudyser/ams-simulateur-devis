@@ -27,6 +27,21 @@ service cloud.firestore {
       allow create, update, delete: if isAdmin();
     }
 
+    // Agences : agencies/{agencyId} ({ name })
+    // Lecture : tout utilisateur connecté. Écriture : admin uniquement.
+    match /agencies/{agencyId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // Prix personnalisés par agence : agencyPrices/{agencyId} ({ overrides })
+    // Lecture : tout utilisateur connecté (un concessionnaire doit charger la grille de son agence)
+    // Écriture : admin uniquement
+    match /agencyPrices/{agencyId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
     // Flags admin : admins/{uid} (doc vide)
     // Lecture : soi-même uniquement. Écriture : bloquée -> gérée à la main dans la console.
     match /admins/{uid} {

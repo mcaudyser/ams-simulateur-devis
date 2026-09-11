@@ -450,6 +450,28 @@ async function loadServices(){
   }
 }
 
+/* Applique par-dessus `services` (déjà chargé) les prix personnalisés d'une agence
+   (agencyPrices/{agencyId}.overrides = { "ci-ii": {partner?,expert?,boxer?} }).
+   Les champs absents d'une surcharge continuent de suivre la grille par défaut (Chartres). */
+async function applyAgencyOverrides(agencyId){
+  try {
+    const [ovSnap, agSnap] = await Promise.all([
+      db.collection('agencyPrices').doc(agencyId).get(),
+      db.collection('agencies').doc(agencyId).get()
+    ]);
+    if(agSnap.exists) session.account.agencyName = agSnap.data().name || '';
+    const overrides = (ovSnap.exists && ovSnap.data().overrides) || {};
+    Object.keys(overrides).forEach(key => {
+      const [ci, ii] = key.split('-').map(Number);
+      const item = services[ci] && services[ci].items[ii];
+      if(!item) return;
+      item.price = Object.assign({}, item.price, overrides[key]);
+    });
+  } catch(e){
+    console.warn('applyAgencyOverrides: grille par défaut utilisée', e);
+  }
+}
+
 auth.onAuthStateChanged(async (user) => {
   if(!user){ session = null; showLogin(); return; }
   const err = document.getElementById('loginError');
@@ -473,12 +495,13 @@ auth.onAuthStateChanged(async (user) => {
     }
     session = { account: {
       id: d.loginId, label: d.label,
-      agencyGroup: d.agencyGroup || '', priceMultiplier: d.priceMultiplier || 1
+      agencyId: d.agencyId || '', priceMultiplier: d.priceMultiplier || 1
     } };
     await loadServices();
+    if(session.account.agencyId) await applyAgencyOverrides(session.account.agencyId);
     document.getElementById('view-login').style.display = 'none';
     document.getElementById('view-app').style.display = 'block';
-    document.getElementById('agencyPill').textContent = d.label;
+    document.getElementById('agencyPill').textContent = d.label + (session.account.agencyName ? ' — ' + session.account.agencyName : '');
     renderBrands();
     renderProgress('marque');
   } catch(e){
@@ -543,6 +566,10 @@ let adminServices = null;      // copie de travail éditable du catalogue
 let adminServicesDirty = false;
 let adminOpenCat = {};         // ci -> catégorie dépliée
 let secondaryApp = null;       // 2e instance Firebase pour créer des comptes sans déconnecter l'admin
+let adminAgencies = [];                // cache { id, name } des agences (collection `agencies`)
+let adminPriceAgency = '';             // '' = grille par défaut (Chartres) ; sinon id de l'agence éditée
+let adminAgencyOverrides = {};         // copie de travail des surcharges de prix de l'agence sélectionnée : { "ci-ii": {partner?,expert?,boxer?} }
+let adminAgencyOverridesDirty = false;
 
 const ADMIN_CSS = `
   #admin-overlay{ -webkit-font-smoothing:antialiased; }
@@ -595,6 +622,8 @@ const ADMIN_CSS = `
   #admin-overlay .svc-price input:focus{ outline:none; border-color:var(--amber); box-shadow:0 0 0 3px rgba(242,166,60,.14); }
   #admin-overlay .svc-del{ background:none; border:none; color:#C7CBD1; font-size:15px; cursor:pointer; padding:6px 4px; line-height:1; }
   #admin-overlay .svc-del:hover{ color:var(--red); }
+  #admin-overlay .svc-price input.svc-override{ border-color:var(--amber); background:#FFF8EC; font-weight:700; }
+  #admin-overlay .admin-in[disabled]{ background:var(--grey-bg); color:var(--grey-text); cursor:not-allowed; }
   @media (max-width:720px){
     #admin-overlay .svc-item{ grid-template-columns:1fr auto; }
     #admin-overlay .svc-prices{ grid-column:1/-1; flex-wrap:wrap; }
@@ -633,6 +662,7 @@ function enterAdmin(){
       </div>
       <div class="admin-tabs">
         <button class="admin-tab" data-tab="services">Prestations &amp; prix</button>
+        <button class="admin-tab" data-tab="agencies">Agences</button>
         <button class="admin-tab" data-tab="concess">Concessionnaires</button>
       </div>
       <div id="admin-body"></div>
@@ -656,8 +686,25 @@ function adminToast(msg, ok){
 
 function renderAdminBody(){
   document.querySelectorAll('.admin-tab').forEach(b=>b.classList.toggle('active', b.dataset.tab === adminTab));
-  if(adminTab === 'services') renderAdminServices();
+  if(adminTab === 'services') renderAdminServicesTab();
+  else if(adminTab === 'agencies') renderAdminAgencies();
   else renderAdminConcess();
+}
+
+/* Cache légère de la collection `agencies`, rechargée à chaque entrée sur un onglet qui en a besoin
+   (pas à chaque frappe clavier, pour ne pas spammer Firestore). */
+async function loadAdminAgencies(){
+  try {
+    const snap = await db.collection('agencies').orderBy('name').get();
+    adminAgencies = snap.docs.map(d=>({ id: d.id, name: d.data().name || '(sans nom)' }));
+  } catch(e){
+    adminAgencies = [];
+  }
+  return adminAgencies;
+}
+async function renderAdminServicesTab(){
+  await loadAdminAgencies();
+  renderAdminServices();
 }
 
 /* ---------- Onglet PRESTATIONS & PRIX (doc config/services) ---------- */
@@ -681,21 +728,60 @@ function markServicesDirty(){
   if(!adminServicesDirty){ adminServicesDirty = true; renderAdminServices(); }
 }
 
+function currentOverride(ci, ii){ return adminAgencyOverrides[ci + '-' + ii] || null; }
+
+/* Rend une cellule de prix : édition directe du catalogue par défaut, ou — en mode
+   « grille agence » — valeur effective (surcharge si elle existe, sinon valeur par défaut
+   affichée en placeholder) avec un indicateur ● quand ce champ est personnalisé. */
+function svcPriceCell(ci, ii, grille, label, wide){
+  const base = adminServices[ci].items[ii].price;
+  const baseVal = priceToField(base && base[grille]);
+  if(!adminPriceAgency){
+    return `<div class="svc-price${wide?' wide':''}"><label>${label}</label><input value="${escAttr(baseVal)}" placeholder="—" onchange="adminSetPrice(${ci},${ii},'${grille}',this.value)"></div>`;
+  }
+  const ov = currentOverride(ci, ii);
+  const hasOv = !!(ov && Object.prototype.hasOwnProperty.call(ov, grille));
+  const val = hasOv ? priceToField(ov[grille]) : baseVal;
+  return `<div class="svc-price${wide?' wide':''}">
+    <label>${label}${hasOv ? ' <span title="Prix personnalisé pour cette agence" style="color:var(--amber)">●</span>' : ''}</label>
+    <input class="${hasOv?'svc-override':''}" value="${escAttr(val)}" placeholder="${escAttr(baseVal || '—')}" onchange="adminSetAgencyPrice(${ci},${ii},'${grille}',this.value)">
+  </div>`;
+}
+
 function renderAdminServices(){
   const body = document.getElementById('admin-body');
   if(!adminServices) adminServices = JSON.parse(JSON.stringify(services));
   const nbItems = adminServices.reduce((n,c)=>n + c.items.length, 0);
+  const agencyMode = !!adminPriceAgency;
   body.innerHTML = `
     <div class="admin-bar">
-      <button class="btn-primary ${adminServicesDirty ? 'dirty' : ''}" onclick="saveAdminServices()">
-        ${adminServicesDirty ? '● Enregistrer les modifications' : 'Enregistrer dans Firestore'}
-      </button>
-      <button class="admin-btn" onclick="reloadAdminServices()">Recharger</button>
+      <label style="display:flex; flex-direction:column; gap:4px; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--grey-text);">
+        Grille de prix
+        <select class="admin-in" style="width:230px; font-weight:700;" onchange="switchPriceAgency(this.value)">
+          <option value="" ${!agencyMode?'selected':''}>Chartres — grille par défaut</option>
+          ${adminAgencies.map(a=>`<option value="${a.id}" ${adminPriceAgency===a.id?'selected':''}>${escAttr(a.name)}</option>`).join('')}
+        </select>
+      </label>
+      ${agencyMode ? `
+        <button class="btn-primary ${adminAgencyOverridesDirty ? 'dirty' : ''}" onclick="saveAdminAgencyOverrides()">
+          ${adminAgencyOverridesDirty ? '● Enregistrer les prix agence' : 'Enregistrer dans Firestore'}
+        </button>
+        <button class="admin-btn" onclick="reloadAdminAgencyOverrides()">Recharger</button>
+      ` : `
+        <button class="btn-primary ${adminServicesDirty ? 'dirty' : ''}" onclick="saveAdminServices()">
+          ${adminServicesDirty ? '● Enregistrer les modifications' : 'Enregistrer dans Firestore'}
+        </button>
+        <button class="admin-btn" onclick="reloadAdminServices()">Recharger</button>
+        <button class="admin-btn" onclick="addAdminCat()">+ Catégorie</button>
+      `}
       <button class="admin-btn" onclick="toggleAllCats()">${allCatsOpen() ? 'Tout replier' : 'Tout déplier'}</button>
-      <button class="admin-btn" onclick="addAdminCat()">+ Catégorie</button>
       <span class="admin-hint" style="margin-left:auto;">${adminServices.length} catégories · ${nbItems} prestations</span>
     </div>
-    <p class="admin-hint" style="margin-bottom:14px;">Prix vide = prestation non proposée pour cette grille. « Boxer » accepte 3 valeurs séparées par des virgules (petit / moyen / grand fourgon), ex. <code>680, 810, 810</code>.</p>
+    <p class="admin-hint" style="margin-bottom:14px;">
+      ${agencyMode
+        ? 'Seuls les prix modifiés ci-dessous sont propres à cette agence ; tout champ laissé vide reprend automatiquement la grille par défaut (Chartres). Le ● signale un prix déjà personnalisé.'
+        : 'Prix vide = prestation non proposée pour cette grille. « Boxer » accepte 3 valeurs séparées par des virgules (petit / moyen / grand fourgon), ex. <code>680, 810, 810</code>. Cette grille sert de valeur par défaut à toutes les agences qui n\'ont pas de prix personnalisé.'}
+    </p>
     ${adminServices.map((c,ci)=>{
       const open = !!adminOpenCat[ci];
       return `
@@ -709,25 +795,29 @@ function renderAdminServices(){
         <div class="svc-cat-body ${open ? '' : 'hidden'}">
           <div class="svc-catmeta">
             <label>Nom de la catégorie
-              <input class="admin-in" style="width:240px" value="${escAttr(c.cat)}" onchange="adminSet(${ci},null,'cat',this.value)"></label>
+              <input class="admin-in" style="width:240px" value="${escAttr(c.cat)}" ${agencyMode?'disabled':''} onchange="adminSet(${ci},null,'cat',this.value)"></label>
             <label>Icône
-              <input class="admin-in" style="width:58px; text-align:center" value="${escAttr(c.icon||'')}" onchange="adminSet(${ci},null,'icon',this.value)"></label>
+              <input class="admin-in" style="width:58px; text-align:center" value="${escAttr(c.icon||'')}" ${agencyMode?'disabled':''} onchange="adminSet(${ci},null,'icon',this.value)"></label>
             <span style="flex:1"></span>
-            <button class="admin-btn sm" onclick="addAdminItem(${ci})">+ Prestation</button>
-            <button class="admin-btn sm danger" onclick="delAdminCat(${ci})">Supprimer la catégorie</button>
+            ${agencyMode ? '' : `
+              <button class="admin-btn sm" onclick="addAdminItem(${ci})">+ Prestation</button>
+              <button class="admin-btn sm danger" onclick="delAdminCat(${ci})">Supprimer la catégorie</button>
+            `}
           </div>
           ${c.items.map((it,ii)=>`
             <div class="svc-item">
               <div class="svc-item-main">
-                <input class="svc-name-in" value="${escAttr(it.name||'')}" placeholder="Nom de la prestation" onchange="adminSet(${ci},${ii},'name',this.value)">
-                <input class="svc-note-in" value="${escAttr(it.note||'')}" placeholder="+ ajouter une note" onchange="adminSet(${ci},${ii},'note',this.value)">
+                <input class="svc-name-in" value="${escAttr(it.name||'')}" placeholder="Nom de la prestation" ${agencyMode?'disabled':''} onchange="adminSet(${ci},${ii},'name',this.value)">
+                <input class="svc-note-in" value="${escAttr(it.note||'')}" placeholder="+ ajouter une note" ${agencyMode?'disabled':''} onchange="adminSet(${ci},${ii},'note',this.value)">
               </div>
               <div class="svc-prices">
-                <div class="svc-price"><label>Partner</label><input value="${escAttr(priceToField(it.price && it.price.partner))}" placeholder="—" onchange="adminSetPrice(${ci},${ii},'partner',this.value)"></div>
-                <div class="svc-price"><label>Expert</label><input value="${escAttr(priceToField(it.price && it.price.expert))}" placeholder="—" onchange="adminSetPrice(${ci},${ii},'expert',this.value)"></div>
-                <div class="svc-price wide"><label>Boxer</label><input value="${escAttr(priceToField(it.price && it.price.boxer))}" placeholder="—" onchange="adminSetPrice(${ci},${ii},'boxer',this.value)"></div>
+                ${svcPriceCell(ci,ii,'partner','Partner',false)}
+                ${svcPriceCell(ci,ii,'expert','Expert',false)}
+                ${svcPriceCell(ci,ii,'boxer','Boxer',true)}
               </div>
-              <button class="svc-del" title="Supprimer la prestation" onclick="delAdminItem(${ci},${ii})">✕</button>
+              ${agencyMode
+                ? (currentOverride(ci,ii) ? `<button class="svc-del" title="Revenir à la grille par défaut" onclick="resetAgencyItem(${ci},${ii})">↺</button>` : '<span></span>')
+                : `<button class="svc-del" title="Supprimer la prestation" onclick="delAdminItem(${ci},${ii})">✕</button>`}
             </div>`).join('') || '<p class="admin-hint" style="padding:14px 0 4px;">Aucune prestation. Cliquez « + Prestation ».</p>'}
         </div>
       </div>`;
@@ -794,6 +884,132 @@ async function reloadAdminServices(){
   adminToast('Catalogue rechargé.');
 }
 
+/* ---------- Prix par agence (doc agencyPrices/{agencyId}, surcharges éparses) ---------- */
+async function loadAgencyOverrides(agencyId){
+  try {
+    const snap = await db.collection('agencyPrices').doc(agencyId).get();
+    adminAgencyOverrides = (snap.exists && snap.data().overrides) ? JSON.parse(JSON.stringify(snap.data().overrides)) : {};
+  } catch(e){
+    adminAgencyOverrides = {};
+    adminToast('Erreur de chargement des prix agence : ' + e.message, false);
+  }
+}
+async function switchPriceAgency(id){
+  if(adminAgencyOverridesDirty && !confirm('Des modifications de prix non enregistrées pour cette agence seront perdues. Continuer ?')){
+    renderAdminServices();
+    return;
+  }
+  adminPriceAgency = id || '';
+  adminAgencyOverridesDirty = false;
+  adminAgencyOverrides = {};
+  if(adminPriceAgency) await loadAgencyOverrides(adminPriceAgency);
+  renderAdminServices();
+}
+function adminSetAgencyPrice(ci, ii, grille, val){
+  const key = ci + '-' + ii;
+  const v = (val || '').trim();
+  if(v === ''){
+    if(adminAgencyOverrides[key]){
+      delete adminAgencyOverrides[key][grille];
+      if(!Object.keys(adminAgencyOverrides[key]).length) delete adminAgencyOverrides[key];
+    }
+  } else {
+    const p = fieldToPrice(val);
+    if(p === undefined){ adminToast('Prix invalide : ' + val, false); return; }
+    adminAgencyOverrides[key] = adminAgencyOverrides[key] || {};
+    adminAgencyOverrides[key][grille] = p;
+  }
+  adminAgencyOverridesDirty = true;
+  renderAdminServices();
+}
+function resetAgencyItem(ci, ii){
+  delete adminAgencyOverrides[ci + '-' + ii];
+  adminAgencyOverridesDirty = true;
+  renderAdminServices();
+}
+async function saveAdminAgencyOverrides(){
+  try {
+    await db.collection('agencyPrices').doc(adminPriceAgency).set({
+      overrides: adminAgencyOverrides,
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedBy: session.email || session.uid
+    });
+    adminAgencyOverridesDirty = false;
+    renderAdminServices();
+    adminToast('Prix agence enregistrés dans Firestore.');
+  } catch(e){ adminToast('Échec enregistrement : ' + e.message, false); }
+}
+async function reloadAdminAgencyOverrides(){
+  if(adminAgencyOverridesDirty && !confirm('Des modifications non enregistrées seront perdues. Recharger quand même ?')) return;
+  await loadAgencyOverrides(adminPriceAgency);
+  adminAgencyOverridesDirty = false;
+  renderAdminServices();
+  adminToast('Prix agence rechargés.');
+}
+
+/* ---------- Onglet AGENCES (collection agencies) ---------- */
+async function renderAdminAgencies(){
+  const body = document.getElementById('admin-body');
+  body.innerHTML = `
+    <div class="admin-bar">
+      <button class="btn-primary" onclick="showAgencyForm()">+ Nouvelle agence</button>
+      <button class="admin-btn" onclick="renderAdminAgencies()">Rafraîchir</button>
+    </div>
+    <div id="agency-form"></div>
+    <table class="admin-tbl">
+      <thead><tr><th>Nom de l'agence</th><th></th></tr></thead>
+      <tbody id="agency-rows"><tr><td colspan="2" class="admin-hint">Chargement…</td></tr></tbody>
+    </table>
+    <p class="admin-hint" style="margin-top:12px;">La grille « Chartres » (onglet Prestations &amp; prix) reste le catalogue par défaut. Une agence ci-dessous ne pratique que les prix explicitement personnalisés pour elle — le reste suit la grille par défaut. Les concessionnaires sont reliés à une agence depuis l'onglet Concessionnaires.</p>
+  `;
+  await loadAdminAgencies();
+  document.getElementById('agency-rows').innerHTML = adminAgencies.length ? adminAgencies.map(a=>`
+    <tr>
+      <td><input class="admin-in" value="${escAttr(a.name)}" onchange="renameAgency('${a.id}',this.value)"></td>
+      <td><button class="admin-btn sm danger" onclick="deleteAgency('${a.id}','${escAttr(a.name)}')">Supprimer</button></td>
+    </tr>`).join('') : '<tr><td colspan="2" class="admin-hint">Aucune agence. Tous les concessionnaires utilisent la grille par défaut (Chartres).</td></tr>';
+}
+function showAgencyForm(){
+  document.getElementById('agency-form').innerHTML = `
+    <div class="admin-card">
+      <h3>Nouvelle agence</h3>
+      <div class="admin-grid2">
+        <label>Nom de l'agence (ex. Lille)<input class="admin-in" id="na-name"></label>
+      </div>
+      <div style="margin-top:14px; display:flex; gap:8px;">
+        <button class="btn-primary" onclick="createAgency()">Créer</button>
+        <button class="admin-btn" onclick="document.getElementById('agency-form').innerHTML=''">Annuler</button>
+      </div>
+    </div>`;
+}
+async function createAgency(){
+  const name = document.getElementById('na-name').value.trim();
+  if(!name) return adminToast('Nom de l\'agence requis.', false);
+  try {
+    await db.collection('agencies').add({ name, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
+    document.getElementById('agency-form').innerHTML = '';
+    adminToast('Agence « ' + name + ' » créée.');
+    renderAdminAgencies();
+  } catch(e){ adminToast('Échec : ' + e.message, false); }
+}
+async function renameAgency(id, name){
+  name = name.trim();
+  if(!name) return adminToast('Nom requis.', false);
+  try {
+    await db.collection('agencies').doc(id).update({ name });
+    adminToast('Agence renommée.');
+  } catch(e){ adminToast('Échec : ' + e.message, false); }
+}
+async function deleteAgency(id, name){
+  if(!confirm('Supprimer l\'agence « ' + name + ' » ? Ses prix personnalisés seront perdus et les concessionnaires qui lui sont reliés retomberont sur la grille par défaut (pensez à les réassigner si besoin).')) return;
+  try {
+    await db.collection('agencies').doc(id).delete();
+    await db.collection('agencyPrices').doc(id).delete().catch(()=>{});
+    adminToast('Agence supprimée.');
+    renderAdminAgencies();
+  } catch(e){ adminToast('Échec : ' + e.message, false); }
+}
+
 /* ---------- Onglet CONCESSIONNAIRES (collection concessionnaires) ---------- */
 function getSecondaryAuth(){
   if(!secondaryApp) secondaryApp = firebase.initializeApp(firebaseConfig, 'admin-secondary');
@@ -810,11 +1026,12 @@ async function renderAdminConcess(){
     </div>
     <div id="concess-form"></div>
     <table class="admin-tbl">
-      <thead><tr><th>Identifiant</th><th>Code</th><th>Nom / libellé</th><th>Groupe</th><th>Mult.</th><th>Actif</th><th></th></tr></thead>
+      <thead><tr><th>Identifiant</th><th>Code</th><th>Nom / libellé</th><th>Agence</th><th>Mult.</th><th>Actif</th><th></th></tr></thead>
       <tbody id="concess-rows"><tr><td colspan="7" class="admin-hint">Chargement…</td></tr></tbody>
     </table>
-    <p class="admin-hint" style="margin-top:12px;">Le code est stocké en clair (accès simulateur uniquement, enjeu faible). Le modifier ici met aussi à jour la connexion. « Supprimer » retire le compte de connexion ET la fiche.</p>
+    <p class="admin-hint" style="margin-top:12px;">Le code est stocké en clair (accès simulateur uniquement, enjeu faible). Le modifier ici met aussi à jour la connexion. « Supprimer » retire le compte de connexion ET la fiche. L'agence détermine la grille de prix vue par ce concessionnaire (gérée dans l'onglet Agences).</p>
   `;
+  await loadAdminAgencies();
   try {
     const snap = await db.collection('concessionnaires').get();
     const rows = [];
@@ -825,7 +1042,10 @@ async function renderAdminConcess(){
         <td><b>${escAttr(r.loginId)}</b></td>
         <td><input class="admin-in" value="${escAttr(r.code||'')}" data-old="${escAttr(r.code||'')}" onchange="changeConcessCode('${r.uid}','${escAttr(r.loginId)}',this)"></td>
         <td><input class="admin-in" value="${escAttr(r.label||'')}" onchange="updateConcess('${r.uid}','label',this.value)"></td>
-        <td><input class="admin-in" value="${escAttr(r.agencyGroup||'')}" onchange="updateConcess('${r.uid}','agencyGroup',this.value)"></td>
+        <td><select class="admin-in" onchange="updateConcess('${r.uid}','agencyId',this.value)">
+          <option value="" ${!r.agencyId?'selected':''}>Chartres (par défaut)</option>
+          ${adminAgencies.map(a=>`<option value="${a.id}" ${r.agencyId===a.id?'selected':''}>${escAttr(a.name)}</option>`).join('')}
+        </select></td>
         <td><input class="admin-in num" value="${escAttr(r.priceMultiplier==null?1:r.priceMultiplier)}" onchange="updateConcess('${r.uid}','priceMultiplier',parseFloat(this.value)||1)"></td>
         <td style="text-align:center"><input type="checkbox" ${r.actif===false?'':'checked'} onchange="updateConcess('${r.uid}','actif',this.checked)"></td>
         <td><button class="admin-btn sm danger" onclick="deleteConcess('${r.uid}','${escAttr(r.loginId)}')">Supprimer</button></td>
@@ -843,7 +1063,12 @@ function showConcessForm(){
         <label>Identifiant (ex. AMS)<input class="admin-in" id="nc-id"></label>
         <label>Code d'accès (≥ 6 caractères)<input class="admin-in" id="nc-code"></label>
         <label>Nom / libellé<input class="admin-in" id="nc-label"></label>
-        <label>Groupe<input class="admin-in" id="nc-group"></label>
+        <label>Agence
+          <select class="admin-in" id="nc-agency">
+            <option value="">Chartres (par défaut)</option>
+            ${adminAgencies.map(a=>`<option value="${a.id}">${escAttr(a.name)}</option>`).join('')}
+          </select>
+        </label>
         <label>Multiplicateur prix<input class="admin-in" id="nc-mult" value="1"></label>
       </div>
       <div style="margin-top:14px; display:flex; gap:8px;">
@@ -857,7 +1082,7 @@ async function createConcess(){
   const id = document.getElementById('nc-id').value.trim().replace(/\s+/g, ' ').toUpperCase();
   const code = document.getElementById('nc-code').value.trim();
   const label = document.getElementById('nc-label').value.trim() || id;
-  const group = document.getElementById('nc-group').value.trim();
+  const agencyId = document.getElementById('nc-agency').value;
   const mult = parseFloat(document.getElementById('nc-mult').value) || 1;
   if(idToEmail(id).replace(/@.*/, '').length < 2){
     return adminToast('Identifiant : au moins 2 lettres ou chiffres.', false);
@@ -868,7 +1093,7 @@ async function createConcess(){
     const cred = await sAuth.createUserWithEmailAndPassword(idToEmail(id), code);
     const uid = cred.user.uid;
     await db.collection('concessionnaires').doc(uid).set({
-      loginId: id, code: code, label: label, agencyGroup: group, priceMultiplier: mult, actif: true,
+      loginId: id, code: code, label: label, agencyId: agencyId, priceMultiplier: mult, actif: true,
       createdAt: firebase.firestore.FieldValue.serverTimestamp(),
       createdBy: session.email || session.uid
     });
